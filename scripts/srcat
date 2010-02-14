@@ -2,7 +2,7 @@
 
 use strict;
 
-our $VERSION = "0.01";
+our $VERSION = "0.02";
 
 use Getopt::Compact;
 use IO::All;
@@ -37,7 +37,7 @@ foreach my $file ( @ARGV ) {
     '' > $out;
     
     my @files;
-    my ($comment_handler_start, $comment_handler_end);
+    my ($comment_handler_start, $comment_handler_js_end, $comment_handler_css_end);
     $comment_handler_start = sub {
         my $self = shift;
         local $_ = shift;
@@ -61,13 +61,34 @@ foreach my $file ( @ARGV ) {
                     $text >> $out;
                 }
             }, 'text, tagname');
-            $self->handler(comment => $comment_handler_end, 'self, text');
+            $self->handler(comment => $comment_handler_js_end, 'self, text');
+        } elsif ( /^<!--\s*#srcat-css#\s*-->$/i ) {
+            @files = ();
+            my $is_link_started = 0;
+            $self->handler(start => sub{
+                my ($text, $tagname, $attr) = @_;
+                if ( $tagname eq 'link' && $attr->{rel} =~ /^stylesheet$/i && $attr->{type} =~ m{^text/css$}i && $attr->{href} ) {
+                    $is_link_started = 1;
+                    push @files, $attr->{href};
+                } else {
+                    $text >> $out;
+                }
+            }, 'text, tagname, attr');
+            $self->handler(end => sub{
+                my ($text, $tagname) = @_;
+                if ( $is_link_started && $tagname eq 'link' ) {
+                    $is_link_started = 0;
+                } else {
+                    $text >> $out;
+                }
+            }, 'text, tagname');
+            $self->handler(comment => $comment_handler_css_end, 'self, text');
         } else {
             $_ >> $out;
         }
     };
     
-    $comment_handler_end = sub {
+    $comment_handler_js_end = sub {
         my $self = shift;
         local $_ = shift;
         if ( m{^<!--\s*#/srcat-js#\s*-->$}i ) {
@@ -80,6 +101,28 @@ foreach my $file ( @ARGV ) {
                     print "$file\n";
                 }
                 qq{<script type="text/javascript" src="$outfile"></script>} >> $out;
+            }
+            $self->handler(start   => undef);
+            $self->handler(end     => undef);
+            $self->handler(comment => $comment_handler_start, 'self, text');
+        } else {
+            $_ >> $out;
+        }
+    };
+    
+    $comment_handler_css_end = sub {
+        my $self = shift;
+        local $_ = shift;
+        if ( m{^<!--\s*#/srcat-css#\s*-->$}i ) {
+            if ( @files ) {
+                my $outfile = sprintf "$opts{out}.css", $count++;
+                my $jsout = io("| $opts{'css-minifier'} > " . File::Spec->catfile($dir, $outfile));
+                foreach ( @files ) {
+                    my $file = File::Spec->catfile($dir, $_);
+                    io($file) > $jsout;
+                    print "$file\n";
+                }
+                qq{<link rel="stylesheet" type="text/css" href="$outfile" />} >> $out;
             }
             $self->handler(start   => undef);
             $self->handler(end     => undef);
@@ -154,6 +197,9 @@ and srcat-0.js is:
     document.writeln('first!');
     document.writeln('second!!');
 
+Also, C<< <!-- #srcat-css# --> >> ... C<< <!-- #/srcat-css# --> >> 
+block is available to concat CSS files.
+
 
 =head1 COMMAND LINE PARAMETERS
 
@@ -186,7 +232,7 @@ Example:
 
 =head2 -J I<COMMAND> | --js-minifier I<COMMAND>
 
-Minify cancated scripts with COMMAND.
+Minify concated JavaScript source with COMMAND.
 COMMAND must be filter command, which accepts concated script by STDIN 
 and output minified script to STDOUT.
 
@@ -195,6 +241,18 @@ Default: does not minify scripts
 Example:
 
     srcat -J "java -jar yuicompressor.jar --type js" another.html
+
+=head2 -C I<COMMAND> | --css-minifier I<COMMAND>
+
+Minify concated CSS source with COMMAND.
+COMMAND must be filter command, which accepts concated script by STDIN 
+and output minified script to STDOUT.
+
+Default: does not minify scripts
+
+Example:
+
+    srcat -C "java -jar yuicompressor.jar --type css" another.html
 
 
 =head1 AUTHOR
