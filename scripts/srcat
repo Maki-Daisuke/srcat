@@ -9,6 +9,7 @@ use IO::All;
 use File::Copy;
 use File::Spec;
 use File::Basename;
+use HTML::Parser;
 
 our %opts;
 *opts = new Getopt::Compact(
@@ -29,27 +30,75 @@ my $count = 0;
 
 foreach my $file ( @ARGV ) {
     copy $file, "$file$opts{backup}"  or die "Can't copy file $file -> $file$opts{backup}: $!"  if length $opts{backup};
+    
     my $dir = dirname $file;
     my $source < io($file);
-    $source =~ s{<!--\s*#srcat-js#\s*-->(.*?)<!--\s*#/srcat-js#\s*-->}{
-        my $block = $1;
-        my $outfile = sprintf "$opts{out}.js", $count++;
-        my @src;
-        $block =~ s{<script\s(?:[^>'"]*|'[^']*'|"[^"]*")*src=["']([^'"]+)["'](?:[^>'"]*|'[^']*'|"[^"]*")*>\s*</script>}{
-            push @src, $1;
-            ''
-        }eig;
-        my $out = io("| $opts{'js-minifier'} > " . File::Spec->catfile($dir, $outfile));
-        foreach ( @src ) {
-            my $src = File::Spec->catfile($dir, $_);
-            io($src) > $out;
-            print "$src\n";
+    my $out = io("$file");
+    '' > $out;
+    
+    my @files;
+    my ($comment_handler_start, $comment_handler_end);
+    $comment_handler_start = sub {
+        my $self = shift;
+        local $_ = shift;
+        if ( /^<!--\s*#srcat-js#\s*-->$/i ) {
+            @files = ();
+            my $is_script_started = 0;
+            $self->handler(start => sub{
+                my ($text, $tagname, $attr) = @_;
+                if ( $tagname eq 'script' && $attr->{type} =~ /javascript/i && $attr->{src} ) {
+                    $is_script_started = 1;
+                    push @files, $attr->{src};
+                } else {
+                    $text >> $out;
+                }
+            }, 'text, tagname, attr');
+            $self->handler(end => sub{
+                my ($text, $tagname) = @_;
+                if ( $is_script_started && $tagname eq 'script' ) {
+                    $is_script_started = 0;
+                } else {
+                    $text >> $out;
+                }
+            }, 'text, tagname');
+            $self->handler(comment => $comment_handler_end, 'self, text');
+        } else {
+            $_ >> $out;
         }
-        $block =~ s/^\s+\n//mg;
-        qq{$block<script type="text/javascript" src="$outfile"></script>}
-    }esg;
-    $source > io($file);
+    };
+    
+    $comment_handler_end = sub {
+        my $self = shift;
+        local $_ = shift;
+        if ( m{^<!--\s*#/srcat-js#\s*-->$}i ) {
+            if ( @files ) {
+                my $outfile = sprintf "$opts{out}.js", $count++;
+                my $jsout = io("| $opts{'js-minifier'} > " . File::Spec->catfile($dir, $outfile));
+                foreach ( @files ) {
+                    my $file = File::Spec->catfile($dir, $_);
+                    io($file) > $jsout;
+                    print "$file\n";
+                }
+                qq{<script type="text/javascript" src="$outfile"></script>} >> $out;
+            }
+            $self->handler(start   => undef);
+            $self->handler(end     => undef);
+            $self->handler(comment => $comment_handler_start, 'self, text');
+        } else {
+            $_ >> $out;
+        }
+    };
+    
+    
+    my $parser = HTML::Parser->new(
+        api_version => 3,
+        default_h => [sub{ shift >> $out }  , 'text'      ],
+        comment_h => [$comment_handler_start, 'self, text'],
+    );
+    $parser->parse($source);
+    $parser->eof;
 }
+
 
 
 __END__
